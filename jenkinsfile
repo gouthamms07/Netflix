@@ -1,21 +1,25 @@
 pipeline {
     agent any
+
     tools {
-        jdk 'jdk17'          // JDK 17 installation name in Jenkins
-        nodejs 'node16'      // NodeJS 16 installation name in Jenkins
+        jdk 'jdk17'
+        nodejs 'node16'
     }
+
     environment {
-        SCANNER_HOME = tool 'sonar-scanner' // Sonar scanner installation
+        SCANNER_HOME = tool 'sonar-scanner'
+        IMAGE_NAME = "ahmed7860/netflix"
+        IMAGE_TAG = "latest"
     }
+
     stages {
-        // Clean workspace at the start
+
         stage('Clean Workspace') {
             steps {
                 cleanWs()
             }
         }
 
-        // Verify Java, Node, and NPM versions
         stage('Verify Tools') {
             steps {
                 sh 'java --version'
@@ -24,44 +28,39 @@ pipeline {
             }
         }
 
-        // Checkout code from GitHub
         stage('Checkout from Git') {
             steps {
-                git branch: 'main', 
+                git branch: 'main',
                     url: 'https://github.com/Ahmedgit7/Netflix-DevSecOps-Project.git',
                     credentialsId: 'git'
             }
         }
 
-        // SonarQube code analysis
-        stage('SonarQube Analysis') {
-            steps {
-                withSonarQubeEnv('sonar-server') {
-                    sh '''$SCANNER_HOME/bin/sonar-scanner \
-                        -Dsonar.projectName=Netflix \
-                        -Dsonar.projectKey=Netflix'''
-                }
-            }
-        }
-
-        // Sonar Quality Gate
-        stage('Quality Gate') {
-            steps {
-                script {
-                    waitForQualityGate abortPipeline: false, credentialsId: 'Sonar'
-                }
-            }
-        }
-
-        // Install Node dependencies
         stage('Install Dependencies') {
             steps {
                 sh 'npm install'
             }
         }
 
-        // OWASP Dependency Check
-        stage('OWASP FS Scan') {
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonar-server') {
+                    sh """
+                    ${SCANNER_HOME}/bin/sonar-scanner \
+                    -Dsonar.projectName=Netflix \
+                    -Dsonar.projectKey=Netflix
+                    """
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                waitForQualityGate abortPipeline: true
+            }
+        }
+
+        stage('OWASP Dependency Check') {
             steps {
                 dependencyCheck additionalArguments: '--scan ./ --disableYarnAudit --disableNodeAudit',
                                 odcInstallation: 'DP-Check'
@@ -69,58 +68,38 @@ pipeline {
             }
         }
 
-        // Trivy filesystem scan
-        stage('TRIVY FS Scan') {
+        stage('Trivy FS Scan') {
             steps {
-                sh 'trivy fs . > trivyfs.txt'
+                sh 'trivy fs . --severity HIGH,CRITICAL > trivyfs.txt || true'
             }
         }
 
-        // Docker build and push
         stage('Docker Build & Push') {
             steps {
-                script {
-                    withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
-                        sh '''
-                        docker build --build-arg TMDB_V3_API_KEY=<YOUR_API_KEY> -t netflix .
-                        docker tag netflix ahmed7860/netflix:latest
-                        docker push ahmed7860/netflix:latest
-                        '''
-                    }
+                withDockerRegistry(credentialsId: 'docker', toolName: 'docker') {
+                    sh """
+                    docker build \
+                    --build-arg TMDB_V3_API_KEY=${TMDB_V3_API_KEY} \
+                    -t ${IMAGE_NAME}:${IMAGE_TAG} .
+
+                    docker push ${IMAGE_NAME}:${IMAGE_TAG}
+                    """
                 }
             }
         }
 
-        // Trivy image scan
-        stage('TRIVY Image Scan') {
+        stage('Trivy Image Scan') {
             steps {
-                sh 'trivy image ahmed7860/netflix:latest > trivyimage.txt'
+                sh 'trivy image ${IMAGE_NAME}:${IMAGE_TAG} --severity HIGH,CRITICAL > trivyimage.txt || true'
             }
         }
 
-        // Update deployment YAML in GitHub
-        stage('Update Deployment YAML') {
+        stage('Deploy Container') {
             steps {
-                script {
-                    withCredentials([usernamePassword(credentialsId: 'git', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
-                        sh '''
-                        cd Kubernetes
-                        sed -i 's#image: ahmed7860/netflix:.*#image: ahmed7860/netflix:'${BUILD_NUMBER}'#' deployment.yml
-                        git config user.email "ahmedhshaikh786@example.com"
-                        git config user.name "Ahmed"
-                        git add deployment.yml
-                        git commit -m "Update image version to ${BUILD_NUMBER}"
-                        git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/Ahmedgit7/Netflix-DevSecOps-Project.git main
-                        '''
-                    }
-                }
-            }
-        }
-
-        // Deploy container locally
-        stage('Deploy to Container') {
-            steps {
-                sh 'docker run -d -p 8081:80 ahmed7860/netflix:latest'
+                sh '''
+                docker rm -f netflix || true
+                docker run -d --name netflix -p 8081:80 ${IMAGE_NAME}:${IMAGE_TAG}
+                '''
             }
         }
     }
@@ -129,12 +108,14 @@ pipeline {
         always {
             emailext (
                 attachLog: true,
-                subject: "${currentBuild.result} - Netflix Project",
-                body: """Project: ${env.JOB_NAME}<br/>
-                        Build Number: ${env.BUILD_NUMBER}<br/>
-                        URL: ${env.BUILD_URL}<br/>""",
+                subject: "${currentBuild.currentResult} - Netflix DevSecOps Pipeline",
+                body: """
+                Job: ${env.JOB_NAME}<br/>
+                Build Number: ${env.BUILD_NUMBER}<br/>
+                Build URL: ${env.BUILD_URL}<br/>
+                """,
                 to: 'ahmedhshaikh786@gmail.com',
-                attachmentsPattern: 'trivyfs.txt, trivyimage.txt'
+                attachmentsPattern: 'trivyfs.txt,trivyimage.txt'
             )
         }
     }
